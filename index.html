@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Static Chess (PvC + Analysis)</title>
+
+  <!-- jQuery (required by chessboard.js) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+  <!-- chessboard.js 1.0.0 (CSS + JS) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.css" crossorigin="anonymous" referrerpolicy="no-referrer"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+  <!-- chess.js 0.12.1 UMD (script tag safe) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.12.1/chess.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 16px; }
+    .app { display: grid; grid-template-columns: 1fr 320px; gap: 16px; align-items: start; }
+    #board { width: min(80vw, 560px); max-width: 560px; }
+    .panel { border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .hist { max-height: 220px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .pv { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; font-size: 12px; }
+    .eval { font-variant-numeric: tabular-nums; }
+    .timer { font-variant-numeric: tabular-nums; font-weight: 600; }
+    button, select, input { padding: 6px 10px; }
+    @media (max-width: 900px) { .app { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <h1>Static Chess — PvC + Analysis</h1>
+  <div class="app">
+    <div>
+      <div id="board"></div>
+      <div class="panel" style="margin-top:12px">
+        <div class="row">
+          <label>Side:</label>
+          <select id="side">
+            <option value="white">White</option>
+            <option value="black">Black</option>
+          </select>
+
+          <label>Difficulty:</label>
+          <select id="level">
+            <option value="1">1 – Very Easy</option>
+            <option value="2">2 – Easy</option>
+            <option value="3" selected>3 – Casual</option>
+            <option value="4">4 – Solid</option>
+            <option value="5">5 – Strong</option>
+            <option value="6">6 – Hard</option>
+          </select>
+
+          <label>Time:</label>
+          <select id="timeCtrl">
+            <option value="300|2">5+2</option>
+            <option value="600|5" selected>10+5</option>
+            <option value="0|0">Unlimited</option>
+          </select>
+
+          <button id="new">New</button>
+          <button id="undo">Undo</button>
+          <button id="resign">Resign</button>
+          <button id="draw">Offer Draw</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button id="toPgn">Export PGN</button>
+          <input id="pgnIn" placeholder="Paste PGN and Import" style="flex:1"/>
+          <button id="fromPgn">Import</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <span>White <span id="wClock" class="timer">10:00</span> · Black <span id="bClock" class="timer">10:00</span></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3 style="margin-top:0">Analysis</h3>
+      <div class="row">
+        <button id="analyze">Start</button>
+        <button id="stop">Stop</button>
+        <span>Eval: <span id="eval" class="eval">—</span></span>
+      </div>
+      <div style="margin-top:8px">
+        <div style="font-weight:600">PV</div>
+        <div id="pv" class="pv">—</div>
+      </div>
+      <div style="margin-top:8px">
+        <div style="font-weight:600">Moves</div>
+        <div id="moves" class="hist">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- App logic -->
+  <script src="engine-controller.js"></script>
+  <script src="game.js"></script>
+  <script>
+    (async function () {
+      // Board
+      const board = Chessboard('board', {
+        position: 'start',
+        draggable: true,
+        pieceTheme: 'img/chesspieces/wikipedia/{piece}.png' // optional: switch to your SVG set
+      });
+
+      // UI elements
+      const sideSel = document.getElementById('side');
+      const levelSel = document.getElementById('level');
+      const timeCtrlSel = document.getElementById('timeCtrl');
+      const btnNew = document.getElementById('new');
+      const btnUndo = document.getElementById('undo');
+      const btnResign = document.getElementById('resign');
+      const btnDraw = document.getElementById('draw');
+      const btnAnalyze = document.getElementById('analyze');
+      const btnStop = document.getElementById('stop');
+      const movesEl = document.getElementById('moves');
+      const pvEl = document.getElementById('pv');
+      const evalEl = document.getElementById('eval');
+      const pgnIn = document.getElementById('pgnIn');
+      const wClock = document.getElementById('wClock');
+      const bClock = document.getElementById('bClock');
+
+      // Engine
+      const engine = createEngineController('engine-worker.js', (line) => {
+        if (line.type === 'info') {
+          if (typeof line.cp === 'number') evalEl.textContent = (line.cp/100).toFixed(2);
+          if (line.pvSAN) pvEl.textContent = line.pvSAN.join(' ');
+        } else if (line.type === 'bestmove') {
+          Game.onEngineBestMove(line.move);
+          board.position(Game.game.fen(), true);
+          movesEl.textContent = Game.game.pgn({ max_width: 14, newline_char:'\n' });
+        }
+      });
+
+      // Game
+      Game.init({
+        board,
+        engine,
+        ui: { movesEl, pvEl, evalEl, wClock, bClock }
+      });
+
+      // UI bindings
+      board.onDragStart = (source, piece) => Game.onDragStart(source, piece, sideSel.value);
+      board.onDrop = (source, target) => {
+        const ok = Game.onPlayerMove(source, target);
+        if (ok) movesEl.textContent = Game.game.pgn({ max_width: 14, newline_char:'\n' });
+        return ok ? 'snapback' : undefined;
+      };
+      board.onSnapEnd = () => board.position(Game.game.fen());
+
+      btnNew.onclick = () => {
+        Game.newGame({ humanSide: sideSel.value, level: Number(levelSel.value), timeCtrl: timeCtrlSel.value });
+        board.start();
+        movesEl.textContent = '—';
+        pvEl.textContent = '—';
+        evalEl.textContent = '—';
+      };
+      btnUndo.onclick = () => { Game.undo(); board.position(Game.game.fen(), true); movesEl.textContent = Game.game.pgn({ max_width: 14, newline_char:'\n' }); };
+      btnResign.onclick = () => Game.resign();
+      btnDraw.onclick = () => Game.offerDraw();
+      btnAnalyze.onclick = () => Game.startAnalysis();
+      btnStop.onclick = () => Game.stopAnalysis();
+
+      document.getElementById('toPgn').onclick = () => {
+        const pgn = Game.game.pgn();
+        navigator.clipboard.writeText(pgn);
+        alert('PGN copied to clipboard');
+      };
+      document.getElementById('fromPgn').onclick = () => {
+        if (!pgnIn.value.trim()) return;
+        Game.loadPGN(pgnIn.value.trim());
+        board.position(Game.game.fen(), true);
+        movesEl.textContent = Game.game.pgn({ max_width: 14, newline_char:'\n' });
+      };
+
+      // Kick off
+      btnNew.click();
+    })();
+  </script>
+</body>
+</html>
